@@ -1,0 +1,306 @@
+---
+title: "Loans with Duration"
+output: html_notebook
+author: Art Steinmetz
+---
+#Examine properties of loans with duration
+
+NOTE: This is not a trading strategy.  It is an analysis of fundamental portfolio properties.
+As such we are not concerned with transaction costs or specific securities.  The question we will answer is akin to the question "What does adding bonds do to the risk and reward of a stock index portfolio?" Transaction costs are not that relevant to the question.  In practice, rolling Treasury futures or interest-rate swaps would entail ongoing trading costs but these are highly liquid markets with de-minimus bid-offer spreads.
+
+```{r}
+library(PerformanceAnalytics)
+library(xts)
+library(stringr)
+library(tidyverse)
+library(broom)
+library(tidyquant)
+library(Rblpapi)
+library(timetk)
+
+source("utilities.r") # tidy_bdh(), chart_cum_returns()
+```
+
+```{r}
+
+tidy_chart_drawdowns<-function(r,shape=c('narrow','wide')){ #columns of name, date and return
+  #returns a ggplot2 line chart object for plotting or further annotation
+  shape=match.arg(shape)
+  if (shape=='narrow'){
+    xts_r<- r %>% 
+      select(name,date,return) %>% 
+      spread(name,return) %>% 
+      tk_xts(date_var=date,silent = TRUE)
+  } else{
+    xts_r<- r %>% 
+      tk_xts(date_var=date,silent = TRUE)
+  }
+  
+  #pull out date as apply will lose it
+  dd_date<-time(xts_r)
+  
+  gg<-xts_r %>%apply(2,DrawdownPeak) %>% 
+    as_tibble() %>% 
+    mutate(date=dd_date) %>% #put date back
+    gather(name,drawdown,-date) %>% 
+    group_by(name) %>% 
+    ggplot(aes(x=date,y=drawdown,color=name))+geom_line()
+  
+  return(gg)    
+}
+
+#---------------------------------------------------------------------
+indices<-c("LBUSTRUU Index",
+           "JPMTUS Index",
+           "SPBDAL Index",
+           "CSLLLTOT Index",
+           'LF98TRUU Index',
+           "USC0TR03 Index",
+           "US0003M Index")
+
+index_names<-c("BarcAgg",
+               "Tsy",
+               "SPLoan",
+               "Loans",
+               "BarcHY",
+               "LIBOR3m_ret",
+               "LIBOR3m_rate")
+
+funds<-c("BKLN Equity",
+         "HYG Equity",
+         "OOSAX Equity")
+
+fund_names<-c("Loan ETF",
+              "HY Bond ETF",
+              "Opp SFR")
+
+common_names<-tibble(ticker=c(indices,funds),name=c(index_names,fund_names)) %>% 
+  mutate(ticker=word(ticker))
+
+#some constants
+OPTS_DAILY = c("periodicitySelection"="DAILY")
+OPTS_MONTHLY = c("periodicitySelection"="MONTHLY")
+START_DATE<- as.Date("1990-01-01")
+FIELDS_NDX="LAST_PRICE"
+FIELDS_FUNDS='DAY_TO_DAY_TOT_RETURN_GROSS_DVDS'
+
+#to simulate a "loans plus" portfolio
+LEVG_FACTOR = 1.2
+HY_ALLOC =0.1
+```
+
+```{r}
+#get bbgdata
+if (!file.exists("data/loan_dur_data_raw.rdata")){
+raw_ret_data_ndx<-tidy_bdh(secs=indices,
+                           fields=FIELDS_NDX,
+                           options=OPTS_MONTHLY,
+                           start.date=START_DATE)
+
+
+#since we are getting monthly data from different sources, month end data might be inconsistent.
+#force consistancy with yearmon class
+raw_ret_data_ndx<-raw_ret_data_ndx %>% 
+  mutate(date=date %>% 
+           as.yearmon(date) %>% 
+           as.Date(frac=1))
+  
+} else {
+  load("data/loan_dur_data_raw.rdata")
+}
+```
+
+```{r, message=FALSE, warning=TRUE}
+#create return series
+#except where LAST_PRICE is a rate not a price, then compute with monthly compounding
+ret_data_ndx<-raw_ret_data_ndx %>% 
+  group_by(ticker) %>% 
+  mutate(return=if_else(ticker=="US0003M",(1+LAST_PRICE/1200)-1,LAST_PRICE/lag(LAST_PRICE)-1))
+  # below is the right way to convert a rate to a monthly return but simple compounding comes closer
+  # to the BBG return series.
+  #  mutate(return=if_else(ticker=="US0003M",((1+LAST_PRICE/100))^(1/12)-1,LAST_PRICE/lag(LAST_PRICE)-1))
+
+#add common names
+ret_data_ndx<-ret_data_ndx %>%
+  ungroup() %>% 
+  left_join(common_names) %>% 
+  group_by(name)
+```
+The CS loan index series is longer than the SP series. Can we use it?  Close enough.
+
+```{r}
+#show earliest
+first_obs<-ret_data_ndx %>% summarise(earliest=min(date),n=n())
+first_obs
+```
+SPDBAL has shorter history than CSLLLTOT. Can we use the latter?
+```{r}
+earliest<-ret_data_ndx %>% 
+  filter(ticker=='SPBDAL') %>% 
+  ungroup() %>% 
+  summarize(min(date)) %>% 
+  pull(1)
+
+ret_data_ndx %>% 
+  filter(ticker=="CSLLLTOT" | ticker=="SPBDAL",date>earliest-1) %>%
+  chart_cum_returns()
+
+
+```
+The LIBOR rate series is longer than the LIBOR index series. Can we use it?  The discrepency is a bit wide.  I prefer the return series so I chain the rate series just for the earlier dates.
+
+```{r}
+earliest<-ret_data_ndx %>% 
+  filter(name=='LIBOR3m_ret') %>% 
+  ungroup() %>% 
+  summarize(min(date)) %>% 
+  pull(1)
+
+
+ret_data_ndx %>% 
+  filter(name %in% c("LIBOR3m_rate","LIBOR3m_ret"),date>earliest-1) %>%
+  chart_cum_returns()
+
+```
+
+```{r}
+#create blended portfolios.
+#a portfolio of treasuries minus libor 1month carry
+# we go back to wide to make it easier to mutate columns
+r<-ret_data_ndx %>% 
+  select(date,name,return) %>% 
+  spread(name,return)
+
+#pad missing LIBOR with monthly return computed from rate
+r<-r %>% mutate(LIBOR3m_ret=if_else(is.na(LIBOR3m_ret),LIBOR3m_rate,LIBOR3m_ret))
+# consolidate LIBOR
+r<-r %>% select(-LIBOR3m_rate,-SPLoan) %>% rename(LIBOR3m=LIBOR3m_ret)
+# remove dates where we can't make a simulated portfolio
+r<-r %>% filter(!is.na(Loans))
+
+#create simulated portfolio returns
+r<-r %>% mutate(levg_tsy=Tsy-LIBOR3m)
+r<-r %>% mutate(Loans_w_Dur=Loans+levg_tsy)
+r<-r %>% mutate(Loans_plus= ((1-HY_ALLOC)*Loans+HY_ALLOC*BarcHY)*LEVG_FACTOR - LIBOR3m*(LEVG_FACTOR-1))
+r<-r %>% mutate(HY_wo_Dur=BarcHY-levg_tsy)
+r<-r %>% mutate(HY_w_Dur=BarcHY+levg_tsy)
+
+# r is for CAPM return analytics data_ndx is for graphing wealth
+data_ndx <-r %>% 
+  gather(name,return,-date) %>% 
+  group_by(name)
+
+```
+#Theretical Foundation
+Orthogonal return factors, both with positive risk premia.
+
+How are Loans related to Treasuries?
+```{r}
+gg<-r %>% ggplot(aes(x=Tsy,y=Loans))+geom_point()+geom_smooth(method="lm")
+gg<-gg+theme(aspect.ratio=1)
+gg
+
+tidy(lm(Loans~Tsy,data=r))
+glance(lm(Loans~Tsy,data=r))
+
+```
+How are HY bonds related to Treasuries?
+```{r}
+gg<-r %>% ggplot(aes(x=Tsy,y=BarcHY))+geom_point()+geom_smooth(method="lm")
+gg<-gg+theme(aspect.ratio=1)
+gg
+tidy(lm(Loans~Tsy,data=r))
+glance(lm(Loans~Tsy,data=r))
+```
+
+Return analysis
+```{r}
+
+data_ndx %>% 
+  filter(date>as.Date("1996-12-30")) %>% 
+  filter(name %in% c("BarcAgg","BarcHY","Loans","Loans_w_Dur")) %>%
+  chart_cum_returns()
+
+```
+#Performance during recent rise in interest rates.
+
+After the 2016 election rates spiked up for a time.  How did Loans-with-Duration perform?
+
+```{r}
+data_ndx %>% 
+  filter(date>as.Date("2016-08-30")) %>% 
+  filter(name %in% c("Loans","Loans_w_Dur","BarcAgg", "Tsy","BarcHY")) %>%
+  chart_cum_returns()
+
+```
+#Inverted Yield Curve Period
+Yield Curve was flat to inverted from late 1997 to early 2001.  Negative carry hurt the portfolio but falling rates (which typically follow such periods) boosted the portfolio coming out of it.
+```{r}
+
+data_ndx %>% 
+  filter(date>as.Date("1997-09-30")) %>% 
+  filter(date<as.Date("2002-12-30")) %>% 
+  filter(name %in% c("BarcAgg","BarcHY","Loans","Loans_w_Dur")) %>%
+  chart_cum_returns()
+
+```
+
+Drawdown analysis
+```{r}
+r %>% 
+  select(date, BarcAgg,BarcHY,Loans_w_Dur,Loans) %>% 
+  tidy_chart_drawdowns(shape='wide')
+
+r %>% 
+  select(date, Tsy,levg_tsy) %>% 
+  tidy_chart_drawdowns(shape='wide')
+
+temp <-r %>% 
+  select(date, BarcAgg,BarcHY,Loans_w_Dur,Loans) %>% 
+  gather(name,return,-date) %>% group_by(name)
+
+gg<-temp %>% 
+  tq_performance(return,performance_fun = maxDrawdown) %>% 
+  arrange(maxDrawdown.1) %>% 
+  ggplot(aes(x=reorder(name,maxDrawdown.1),y=-maxDrawdown.1))+geom_col()
+
+gg<-gg+labs(x='',y='Max Drawdown (1995-2017)')
+gg
+
+#table.AnnualizedReturns(r)
+```
+
+
+```{r}
+drawdownSummary<-function(dat){
+  dd<-NULL
+  for (n in 1:ncol(dat)) {
+    d<-findDrawdowns(dat[,n])$length
+    a<-findDrawdowns(dat[,n])$return
+    
+    
+    dd<-bind_rows(dd,data_frame(name=names(dat[,n]),
+                                  Frequency=length(d),
+                                  AvgMonths=round(mean(d),2),
+                                  AvgDrawPct=round(100*mean(a),2),
+                                  MaxDrawPct=round(100*min(a),2)
+                                  )
+              )
+  }
+  return(dd)
+}
+
+drawdownSummary(tk_xts(r,date_var = date)) %>% arrange(MaxDrawPct) %>% filter(name != 'LIBOR3m')
+```
+
+```{r}
+r_xts <- tk_xts(r,date_var = date)
+chart.CumReturns(r_xts[,c('Loans_w_Dur','HY_w_Dur')])
+table.CAPM(Ra=r_xts,Rb=r_xts$BarcAgg,Rf=r_xts$LIBOR3m)
+SharpeRatio.annualized(r_xts,Rf=r_xts$LIBOR3m,scale=12)
+```
+
+```{r}
+
+```
+
