@@ -301,6 +301,6 @@ SharpeRatio.annualized(r_xts,Rf=r_xts$LIBOR3m,scale=12)
 ```
 
 ```{r}
-
+r %>% select(-LIBOR3m) %>% tk_xts(silent=TRUE)
 ```
 
