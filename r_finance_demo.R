@@ -1,4 +1,5 @@
 #Using tidy_bdh()
+
 library(tidyverse)
 library(Rblpapi)
 
@@ -8,13 +9,20 @@ end_date <- as.Date("2009-04-01")
 fields = "PX_LAST"
 bdh_opts = c("periodicitySelection"="MONTHLY")
 
-#must have a valid blp session running
-blpConnect() 
-bbg_dat <- bdh(secs,
-               start.date = start_date,
-               end.date = end_date, 
-               fields = fields,
-               options = bdh_opts)
+if (file.exists("data/bbg_dat.rdata")) {
+  load("data/bbg_dat.rdata")
+} else {
+  #must have a valid blp session running
+  blpConnect() 
+  # Normal access to blp api
+  bbg_dat <- bdh(secs,
+                 start.date = start_date,
+                 end.date = end_date, 
+                 fields = fields,
+                 options = bdh_opts)
+  save(bbg_dat,file="data/bbg_dat.rdata")
+}
+
 bbg_dat
 
 
@@ -43,77 +51,97 @@ tidy_bdh<-function(secs,...){
 }
 
 #get bbg data in tidy format
-bbg_dat_tidy <- tidy_bdh(secs,
-               start.date = start_date,
-               end.date = end_date, 
-               fields = fields,
-               options = bdh_opts)
+if (file.exists("data/bbg_dat.rdata")) {
+  load("data/bbg_dat_tidy.rdata")
+} else {
+  bbg_dat_tidy <- tidy_bdh(secs,
+                         start.date = start_date,
+                         end.date = end_date, 
+                         fields = fields,
+                         options = bdh_opts)
+  save(bbg_dat_tidy,file="data/bbg_dat_tidy.rdata")
+}
 bbg_dat_tidy
 
+# easy plot
+bbg_dat_tidy %>% 
+  ggplot(aes(date,
+             PX_LAST,
+             color=ticker)) + 
+  geom_line(size=2)
 
+#make returns, stripping NA in first date
+rets <- bbg_dat_tidy %>% 
+  group_by(ticker) %>%
+  mutate(return = log(PX_LAST/lag(PX_LAST))) %>% 
+  filter(date > min(date))
 
-save(bbg_dat,file="data/bbg_dat.rdata")
-save(bbg_dat_tidy,file="data/bbg_dat_tidy.rdata")
+# make a 60/40 portfolio
+# first make 'wide'
+port <- rets %>% 
+  select(date,ticker,return) %>% 
+  spread(ticker,return) %>%
+  mutate(Blend = LBUSTRUU * 0.4 + 
+           SPX * 0.6)
+port
 
-# -------------------------------------------------
+#back to long
+port %>% gather(ticker,return,-date)
 
-
-# demo of chart_cum_returns
-library(tidyverse)
+#fix cumret
 library(PerformanceAnalytics)
-source("utilities.r")
-load("data/loan_dur_Data_raw.RData")
-index_names<-c("BarcAgg",
-               "Tsy",
-               "SPLoan",
-               "Loans",
-               "BarcHY",
-               "LIBOR3m_ret",
-               "LIBOR3m_rate")
+port %>% column_to_rownames("date") %>% 
+  chart.CumReturns(legend.loc = "right", 
+                   wealth.index = TRUE,
+    main="Cumulative Return - Does this Bug You?")
 
-funds<-c("BKLN Equity",
-         "HYG Equity",
-         "OOSAX Equity")
-
-fund_names<-c("Loan ETF",
-              "HY Bond ETF",
-              "Opp SFR")
-
-common_names<-tibble(ticker=c(indices,funds),name=c(index_names,fund_names)) %>% 
-  mutate(ticker=word(ticker))
-#create return series
-#except where LAST_PRICE is a rate not a price, then compute with monthly compounding
-ret_data_ndx<-raw_ret_data_ndx %>% 
-  group_by(ticker) %>% 
-  mutate(return=if_else(ticker=="US0003M",(1+LAST_PRICE/1200)-1,LAST_PRICE/lag(LAST_PRICE)-1))
-# below is the right way to convert a rate to a monthly return but simple compounding comes closer
-# to the BBG return series.
-#  mutate(return=if_else(ticker=="US0003M",((1+LAST_PRICE/100))^(1/12)-1,LAST_PRICE/lag(LAST_PRICE)-1))
-
-#add common names
-ret_data_ndx<-ret_data_ndx %>%
-  ungroup() %>% 
-  left_join(common_names) %>% 
-  group_by(name)
-
-r<-ret_data_ndx %>% 
-  group_by() %>% 
-  select(date,ticker,return) %>%
-  #mutate(return = ifelse(is.na(return),0,return)) %>% 
-  spread(ticker,return)
-  
-
-r[106:110,]  %>% 
-  column_to_rownames(var='date') %>% 
-  chart.CumReturns(wealth.index = TRUE,main="Not Indexed to 1",legendloc= "right")
-
-r[106:110,]  %>% chart_cum_returns(shape="wide") + 
+#---------------chart_cum_return-------------------
+chart_cum_returns<-function(Ra, 
+                            ret_col='return',
+                            name_col='name',
+                            date_col='date',
+                            shape=c('narrow','wide')){
+  #returns a ggplot2 line chart object for plotting or further annotation
+  #crucially, this function adds a dummy date at the beginning of the series to start
+  #the plot at the origin without a gap.
+  Ra<-ungroup(Ra)
+  shape<-match.arg(shape)
+  if (shape=='wide'){
+    Ra<- Ra %>%
+      gather(name,return,-date)
+  } else{
+    Ra<-select(Ra,name = name_col,return=ret_col,date=date_col)
+    Ra<- Ra %>% select(date,name,return)
+  }
+  #create wealth index. Add a date to start at "1"
+  # that is equal to the length between the first and second dates
+  new_dates<-(Ra$date[1]-as.numeric(Ra$date[2]-Ra$date[1])) %>% c(Ra$date)
+  #new_dates <- new_dates - 29
+  Ra<- Ra %>% 
+    group_by(name)%>% 
+    complete(date=new_dates,fill=list(return=0)) %>% 
+    mutate(wealth=cumprod(1+return))
+  gg<-Ra %>% 
+    group_by(name) %>% 
+    ggplot(aes(x=date,y=wealth,color=name))+geom_line()
+  return(gg) 
+}
+# --------------------------------------------------------------
+port %>% chart_cum_returns(shape="wide") + 
   labs(title='"There. Fixed It."') + 
   scale_x_date(date_labels = "%b %Y") + 
-  theme_minimal() +  theme(legend.position = "none")
+  theme_minimal() + 
+  scale_color_manual(values=c("green","black","red")) + 
+  geom_line(size=1)
 
 
-blp_bdh_tidy %>% 
-  group_by(ticker) %>% 
-  mutate(return=log(PX_LAST/lag(PX_LAST))) %>% 
-  ggplot(aes(date,return)) + geom_line()
+
+#back to long
+port %>% 
+  gather(ticker,return,-date) %>% 
+  chart_cum_returns(name_col="ticker",shape="narrow") + 
+  labs(title='"There. Fixed It."') + 
+  scale_x_date(date_labels = "%b %Y") + 
+  theme_minimal() + 
+  scale_color_manual(values=c("black","red","green")) + 
+  geom_line(size=1)
