@@ -3,10 +3,9 @@ title: "Loans with Duration"
 output: html_notebook
 author: Art Steinmetz
 ---
-#Examine properties of loans with duration
+# Examine properties of loans with duration
 
-NOTE: This is not a trading strategy.  It is an analysis of fundamental portfolio properties.
-As such we are not concerned with transaction costs or specific securities.  The question we will answer is akin to the question "What does adding bonds do to the risk and reward of a stock index portfolio?" Transaction costs are not that relevant to the question.  In practice, rolling Treasury futures or interest-rate swaps would entail ongoing trading costs but these are highly liquid markets with de-minimus bid-offer spreads.
+NOTE: This is not a trading strategy.  It is an analysis of fundamental portfolio properties. As such we are not concerned with transaction costs or specific securities.  The question we will answer is akin to the question "What does adding bonds do to the risk and reward of a stock index portfolio?" Transaction costs are not that relevant to the question.  In practice, rolling Treasury futures or interest-rate swaps would entail ongoing trading costs but these are highly liquid markets with de-minimus bid-offer spreads.
 
 ```{r}
 library(PerformanceAnalytics)
@@ -77,14 +76,15 @@ fund_names<-c("Loan ETF",
 common_names<-tibble(ticker=c(indices,funds),name=c(index_names,fund_names)) %>% 
   mutate(ticker=word(ticker))
 
-#some constants
+#some parameters for BBG data retrieval
 OPTS_DAILY = c("periodicitySelection"="DAILY")
 OPTS_MONTHLY = c("periodicitySelection"="MONTHLY")
 START_DATE<- as.Date("1990-01-01")
 FIELDS_NDX="LAST_PRICE"
 FIELDS_FUNDS='DAY_TO_DAY_TOT_RETURN_GROSS_DVDS'
 
-#to simulate a "loans plus" portfolio
+# to simulate a "loans plus" portfolio
+# which adds HY bonds plus leverage to a loan portfoli
 LEVG_FACTOR = 1.2
 HY_ALLOC =0.1
 ```
@@ -191,7 +191,7 @@ data_ndx <-r %>%
   group_by(name)
 
 ```
-#Theretical Foundation
+# Theoretical Foundation
 Orthogonal return factors, both with positive risk premia.
 
 How are Loans related to Treasuries?
@@ -301,6 +301,6 @@ SharpeRatio.annualized(r_xts,Rf=r_xts$LIBOR3m,scale=12)
 ```
 
 ```{r}
-r %>% select(-LIBOR3m) %>% tk_xts(silent=TRUE)
+# r %>% select(-LIBOR3m) %>% tk_xts(silent=TRUE)
 ```
 
